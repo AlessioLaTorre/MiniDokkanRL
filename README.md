@@ -15,13 +15,14 @@ The agent controls a team of three units and fights a sequence of boss phases.
 At each turn, the agent chooses:
 
 1. which unit to use;
-2. which cell to select from a 4x4 orb board.
+2. which orb cell to select from the board.
 
 The selected cell determines a connected group of compatible orbs. Collected orbs affect damage, healing, dodge chance, damage reduction, and boss debuffs.
 
 The environment includes:
 
-- 4x4 orb board;
+- default `4x4` orb board;
+- support for larger square boards such as `6x6`;
 - 6 orb types: STR, AGL, TEQ, INT, PHY, RAINBOW;
 - 3 unit roles: Tank, Damage Dealer, Healer;
 - cyclic type-advantage system;
@@ -29,6 +30,20 @@ The environment includes:
 - Gymnasium-like `reset()` and `step()` API;
 - handcrafted baselines and manually implemented RL agents;
 - visual rendering and interactive human GUI.
+
+The final version includes a structured observation mode and a CNN-based DQN Q-map agent. Instead of predicting a fixed vector of 48 Q-values, the Q-map agent predicts:
+
+```text
+Q(row, col, unit)
+```
+
+as a spatial map of shape:
+
+```text
+N x N x 3
+```
+
+This makes the architecture compatible with different square board sizes.
 
 ---
 
@@ -43,84 +58,38 @@ MiniDokkanRL/
 │   ├── greedy_damage_agent.py
 │   ├── dqn_agent.py
 │   ├── dqn_agent_v2.py
+│   ├── dqn_qmap_agent.py
 │   ├── reinforce_baseline_agent.py
+│   ├── reinforce_map_agent.py
 │   └── ...
 │
 ├── env/                     # Custom Gymnasium-style environment
-│   └── mini_dokkan_env.py
+│   ├── mini_dokkan_env.py
+│   ├── observation.py
+│   └── action_mapping.py
 │
 ├── training/                # Training scripts
 │   ├── train_dqn.py
 │   ├── train_dqn_v2.py
-│   ├── train_reinforce.py
+│   ├── train_dqn_qmap.py
+│   ├── train_reinforce_baseline.py
+│   ├── train_reinforce_map.py
 │   └── ...
 │
-├── evaluation/              # Evaluation scripts
-│   └── evaluate_agent.py
+├── evaluation/              # Evaluation utilities
+│   └── agents_registry.py
 │
-├── analysis/                # Tactical analysis and plotting
+├── analysis/                # Tactical analysis and plotting scripts
 │   └── analyze_tactics.py
 │
-├── demos/                   # Visual and human-play demos
+├── demos/                   # Visual demos and human-play GUI
 │   ├── play_human_gui.py
 │   ├── play_human_episode.py
 │   └── run_agent_episode_visual.py
 │
 ├── utils/                   # Rendering and utility functions
-│
-├── models/                  # Saved trained models, optional
-├── results/                 # Generated results, plots, GIFs, optional
-├── report/                  # LaTeX report, optional
-├── requirements.txt
-└── README.md
-# MiniDokkanRL
-
-MiniDokkanRL is a custom Gymnasium-style reinforcement learning environment for tactical orb-based turn-based battles.
-
-The environment is inspired by high-level mechanics from Dokkan Battle, such as orb selection, type matchups, unit roles, and multi-phase boss fights. It is a simplified custom implementation created from scratch for educational purposes. No original assets, code, or proprietary content from the original game are used.
-
-This project was developed for the Autonomous and Adaptive Systems course.
-
----
-
-## Project Overview
-
-The agent controls a team of three units and fights a sequence of boss phases.
-
-At each turn, the agent chooses:
-
-1. which unit to use;
-2. which cell to select from a 4x4 orb board.
-
-The selected cell determines a connected group of compatible orbs. Collected orbs affect damage, healing, dodge chance, damage reduction, and boss debuffs.
-
-The environment includes:
-
-- 4x4 orb board;
-- 6 orb types: STR, AGL, TEQ, INT, PHY, RAINBOW;
-- 3 unit roles: Tank, Damage Dealer, Healer;
-- cyclic type-advantage system;
-- 3 stochastic boss phases;
-- Gymnasium-like `reset()` and `step()` API;
-- handcrafted baselines and manually implemented RL agents;
-- visual rendering and interactive human GUI.
-
----
-
-## Repository Structure
-
-```text
-MiniDokkanRL/
-│
-├── agents/                  # RL agents and heuristic baselines
-├── env/                     # Custom Gymnasium-style environment
-├── training/                # Training scripts
-├── evaluation/              # Evaluation scripts
-├── analysis/                # Tactical analysis and plotting scripts
-├── demos/                   # Visual demos and human-play GUI
-├── utils/                   # Rendering and utility functions
-├── models/                  # Saved models, optional/local
-├── results/                 # Generated results, optional/local
+├── models/                  # Saved trained models, optional/local
+├── results/                 # Generated results, plots, GIFs, optional/local
 ├── report/                  # LaTeX report, optional
 ├── requirements.txt
 └── README.md
@@ -175,12 +144,12 @@ next_obs, reward, terminated, truncated, info = env.step(env.action_space.sample
 print(reward)
 ```
 
-A more informative check:
+A more informative check for the original flat observation mode:
 
 ```python
 from env.mini_dokkan_env import MiniDokkanEnv
 
-env = MiniDokkanEnv(seed=42)
+env = MiniDokkanEnv(seed=42, board_size=4, obs_mode="flat")
 
 obs, info = env.reset()
 action = env.action_space.sample()
@@ -202,8 +171,59 @@ Expected output should include:
 ```text
 Observation shape: (140,)
 Action space: Discrete(48)
-Observation space: Box(0.0, 1.0, (140,), float32)
+Observation space: Box(...)
 Reward: ...
+```
+
+---
+
+## Structured Observation Check
+
+CNN-based agents use a structured observation:
+
+```python
+from env.mini_dokkan_env import MiniDokkanEnv
+
+env = MiniDokkanEnv(
+    seed=42,
+    board_size=4,
+    obs_mode="dict",
+)
+
+obs, info = env.reset()
+
+print(obs["board"].shape)
+print(obs["global"].shape)
+print(obs["units"].shape)
+print(env.action_space)
+```
+
+For a `4x4` board, the board tensor has shape:
+
+```text
+4 x 4 x 6
+```
+
+For a `6x6` board:
+
+```python
+env = MiniDokkanEnv(
+    seed=42,
+    board_size=6,
+    obs_mode="dict",
+)
+```
+
+the board tensor becomes:
+
+```text
+6 x 6 x 6
+```
+
+and the action space becomes:
+
+```text
+3 x 6 x 6 = 108 actions
 ```
 
 ---
@@ -240,12 +260,24 @@ To generate a visual episode played by a trained agent:
 python -m demos.run_agent_episode_visual --agent dqn_v2 --seed 42
 ```
 
+For the CNN Q-map agent:
+
+```bash
+python -m demos.run_agent_episode_visual --agent dqn_qmap --seed 42
+```
+
+For the REINFORCE Policy Map agent:
+
+```bash
+python -m demos.run_agent_episode_visual --agent reinforce_map --seed 42
+```
+
 If the chosen seed does not produce an interesting episode, try a different seed:
 
 ```bash
-python -m demos.run_agent_episode_visual --agent dqn_v2 --seed 100
-python -m demos.run_agent_episode_visual --agent dqn_v2 --seed 250
-python -m demos.run_agent_episode_visual --agent dqn_v2 --seed 999
+python -m demos.run_agent_episode_visual --agent dqn_qmap --seed 100
+python -m demos.run_agent_episode_visual --agent dqn_qmap --seed 250
+python -m demos.run_agent_episode_visual --agent dqn_qmap --seed 999
 ```
 
 The script saves episode frames and a GIF in the `results/` directory.
@@ -263,14 +295,16 @@ python -m demos.run_random_episode_visual
 To analyze the behavior of a specific agent:
 
 ```bash
-python -m analysis.analyze_tactics --agent dqn_v2 --episodes 1000 --seed 42
+python -m analysis.analyze_tactics --agent dqn_qmap --episodes 1000 --seed 42 --board-size 4
 ```
 
-Other examples:
+Examples:
 
 ```bash
-python -m analysis.analyze_tactics --agent greedy_damage --episodes 1000 --seed 42
-python -m analysis.analyze_tactics --agent reinforce_baseline --episodes 1000 --seed 42
+python -m analysis.analyze_tactics --agent dqn_v2 --episodes 1000 --seed 42
+python -m analysis.analyze_tactics --agent greedy_damage --episodes 1000 --seed 42 --board-size 4
+python -m analysis.analyze_tactics --agent greedy_damage --episodes 1000 --seed 42 --board-size 6
+python -m analysis.analyze_tactics --agent reinforce_map --episodes 1000 --seed 42 --board-size 4
 ```
 
 The tactical analysis records:
@@ -306,10 +340,22 @@ python -m training.train_dqn
 python -m training.train_dqn_v2
 ```
 
+### CNN DQN Q-map
+
+```bash
+python -m training.train_dqn_qmap
+```
+
 ### REINFORCE with Baseline
 
 ```bash
 python -m training.train_reinforce_baseline
+```
+
+### REINFORCE Policy Map
+
+```bash
+python -m training.train_reinforce_map
 ```
 
 Training scripts save models in `models/` and logs/metrics in `results/`, depending on the script configuration.
@@ -318,20 +364,87 @@ Saved models are not necessarily included in the repository. If a model file is 
 
 ---
 
-## Main Experimental Result
+## DQN Q-map Architecture
 
-The strongest learned agent is DQN with replay buffer and target network, referred to as `DQN Replay` in the report and `dqn_v2` in the code.
+The DQN Q-map agent uses a structured observation:
 
-In the final evaluation over 1000 episodes with fixed seeds and exploration disabled, DQN Replay outperformed the strongest greedy baseline.
+```text
+obs = {
+    "board":  N x N x 6,
+    "global": global feature vector,
+    "units":  3 x F unit feature matrix,
+}
+```
 
-| Agent | Avg. Return | Win Rate | Phase 3 Clears |
+The board is processed with a CNN. Global and unit features are processed with MLP layers, then broadcast over the board and concatenated with the spatial board features.
+
+The final network output is:
+
+```text
+N x N x 3
+```
+
+where each value represents:
+
+```text
+Q(row, col, unit)
+```
+
+For a `4x4` board:
+
+```text
+4 x 4 x 3 = 48 Q-values
+```
+
+For a `6x6` board:
+
+```text
+6 x 6 x 3 = 108 Q-values
+```
+
+This avoids using a fixed `Dense(48)` output and allows the same architecture to operate on different square board sizes.
+
+---
+
+## REINFORCE Policy Map
+
+The REINFORCE Policy Map agent uses the same structured observation idea as DQN Q-map, but its output has a different meaning.
+
+Instead of predicting Q-values, it predicts policy logits:
+
+```text
+logits(row, col, unit)
+```
+
+These logits are flattened and converted into a probability distribution over actions. During training, the agent samples actions from this distribution. During evaluation, it selects the action with the highest probability.
+
+The agent uses a learned value baseline:
+
+```text
+A_t = G_t - V(s_t)
+```
+
+where `G_t` is the Monte Carlo return and `V(s_t)` is predicted by a value network.
+
+---
+
+## Main Experimental Results
+
+Final evaluation was performed over 1000 episodes with fixed seeds and exploration disabled.
+
+| Agent / Setting | Avg. Return | Win Rate | Phase 3 Clears |
 |---|---:|---:|---:|
-| Random | 0.39 | 3.5% | 35 |
-| DQN | 1.10 | 14.6% | 73 |
-| REINFORCE Baseline | 1.50 | 16.7% | 167 |
-| GreedyOrb | 1.18 | 17.8% | 178 |
-| GreedyDamage | 2.19 | 26.1% | 261 |
-| DQN Replay | 2.66 | 37.2% | 372 |
+| Random 4x4 | 0.39 | 3.5% | 35 |
+| GreedyDamage 4x4 | 2.19 | 26.1% | 261 |
+| DQN Replay 4x4 | 2.66 | 37.2% | 372 |
+| REINFORCE Policy Map 4x4 | 1.03 | 10.2% | 102 |
+| DQN Q-map 4x4 | 3.63 | 52.0% | 520 |
+| GreedyDamage 6x6 | 4.63 | 56.6% | 566 |
+| DQN Q-map 4x4 -> 6x6 | 5.20 | 71.6% | 716 |
+
+The strongest result is obtained by the DQN Q-map agent. It improves over the previous replay-based DQN on the default `4x4` task and can also be evaluated on a larger `6x6` board despite being trained only on `4x4`.
+
+This suggests that the CNN Q-map architecture learns useful spatial action patterns instead of being tied to a fixed 48-action output.
 
 ---
 
@@ -358,7 +471,9 @@ The project also includes:
 - a GUI for human play;
 - GIF rendering of agent episodes;
 - tactical analysis scripts;
-- evaluation scripts for comparing agents.
+- evaluation scripts for comparing agents;
+- structured observation support;
+- CNN Q-map training and evaluation.
 
 ---
 
