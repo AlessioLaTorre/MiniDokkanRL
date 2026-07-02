@@ -71,11 +71,32 @@ def percentage(counter, key):
     return 100.0 * counter[key] / total
 
 
-def analyze_agent_tactics(agent_name, num_episodes=200, seed=20_000):
+def analyze_agent_tactics(
+    agent_name,
+    num_episodes=200,
+    seed=20_000,
+    board_size=4,
+):
     """
     Evaluate tactical tendencies of one agent over many episodes.
+
+    For DQN Q-map and reinforce_map:
+        - use structured observations;
+        - allow variable board sizes.
+
+    For the other agents:
+        - use the original flat observation format.
     """
-    base_env = MiniDokkanEnv(seed=seed)
+
+    qmap_agents = {"dqn_qmap", "reinforce_map"}
+    obs_mode = "dict" if agent_name in qmap_agents else "flat"
+
+    base_env = MiniDokkanEnv(
+        seed=seed,
+        board_size=board_size,
+        obs_mode=obs_mode,
+    )
+
     agent = build_agent(agent_name, base_env)
 
     unit_usage = Counter()
@@ -90,7 +111,12 @@ def analyze_agent_tactics(agent_name, num_episodes=200, seed=20_000):
     total_steps = 0
 
     for episode in range(num_episodes):
-        env = MiniDokkanEnv(seed=seed + episode)
+        env = MiniDokkanEnv(
+            seed=seed + episode,
+            board_size=board_size,
+            obs_mode=obs_mode,
+        )
+
         obs, info = env.reset(seed=seed + episode)
 
         terminated = False
@@ -117,6 +143,7 @@ def analyze_agent_tactics(agent_name, num_episodes=200, seed=20_000):
 
             # --------------------------------------------------------
             # Type of the selected orb.
+            # This is dynamic because board_size can now change.
             # --------------------------------------------------------
             row, col = info["orb_position"]
             selected_orb_id = int(info["board_before"][row, col])
@@ -157,6 +184,8 @@ def analyze_agent_tactics(agent_name, num_episodes=200, seed=20_000):
     print("=" * 70)
     print(f"TACTICAL ANALYSIS - {agent_name}")
     print("=" * 70)
+    print(f"Board size:          {board_size}x{board_size}")
+    print(f"Observation mode:    {obs_mode}")
     print(f"Episodes:            {num_episodes}")
     print(f"Total actions:       {total_steps}")
     print(f"Average return:      {np.mean(total_returns):.3f}")
@@ -212,6 +241,12 @@ def main():
         type=int,
         default=42,
     )
+    parser.add_argument(
+        "--board-size",
+        type=int,
+        default=4,
+        help="Square board size. Example: 4 means 4x4, 5 means 5x5.",
+    )
 
     args = parser.parse_args()
 
@@ -219,6 +254,7 @@ def main():
         agent_name=args.agent,
         num_episodes=args.episodes,
         seed=args.seed,
+        board_size=args.board_size,
     )
 
 

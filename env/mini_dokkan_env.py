@@ -3,6 +3,8 @@ from gymnasium import spaces
 import numpy as np
 from enum import IntEnum
 
+from env.observation import build_observation, build_observation_space
+
 
 class OrbType(IntEnum):
     STR = 0
@@ -69,15 +71,31 @@ class MiniDokkanEnv(gym.Env):
 
     def __init__(
         self,
+        seed=None,
         board_size=4,
+        obs_mode="flat",
         max_turns=30,
         render_mode=None,
-        seed=None,
     ):
         super().__init__()
 
-        self.board_size = board_size
-        self.num_cells = board_size * board_size
+        if isinstance(board_size, (tuple, list)):
+            if len(board_size) != 2:
+                raise ValueError(f"board_size must be an int or a tuple (N, N), got {board_size}.")
+            height, width = board_size
+            if height != width:
+                raise ValueError(f"MiniDokkanRL only supports square boards, got {height}x{width}.")
+            board_size = height
+
+        self.board_size = int(board_size)
+        self.height = self.board_size
+        self.width = self.board_size
+        self.num_cells = self.board_size * self.board_size
+
+        self.obs_mode = obs_mode.lower()
+        if self.obs_mode not in {"flat", "dict"}:
+            raise ValueError(f"Unknown obs_mode: {obs_mode}. Use 'flat' or 'dict'.")
+
         self.num_orb_types = 6
         self.num_unit_types = 5
         self.num_units = 3
@@ -88,42 +106,13 @@ class MiniDokkanEnv(gym.Env):
 
         self.rng = np.random.default_rng(seed)
 
-        # Action: choose one of 3 units and one of 16 board cells.
+        # Action: choose one of 3 units and one board cell.
+        # The number of cells depends on the board size.
         self.action_space = spaces.Discrete(self.num_units * self.num_cells)
 
-        # Observation size:
-        # board one-hot: 16 * 6 = 96
-        # player hp: 1
-        # boss hp: 1
-        # boss type one-hot: 5
-        # next boss attack: 1
-        # phase: 1
-        # turn: 1
-        # units: 3 * (type one-hot 5 + atk 1 + def 1 + dodge 1 + role one-hot 3) = 33
-        obs_dim = (
-                self.num_cells * self.num_orb_types  # board one-hot
-                + 1  # player HP
-                + 1  # boss HP
-                + self.num_unit_types  # boss type one-hot
-                + 1  # total next boss attack
-                + 1  # boss attack reduction
-                + 1  # phase
-                + 1  # turn
-                + self.num_units * (
-                        self.num_unit_types  # unit type one-hot
-                        + 1  # unit ATK
-                        + 1  # unit DEF
-                        + 1  # unit dodge
-                        + self.num_roles  # unit role one-hot
-                )
-        ) # 96 + 1 + 1 + 5 + 1 + 1 + 1 + 1 + 33 = 140
-
-        self.observation_space = spaces.Box(
-            low=0.0,
-            high=1.0,
-            shape=(obs_dim,),
-            dtype=np.float32,
-        )
+        # Observation space is built in env/observation.py.
+        # This keeps flat and structured observations consistent.
+        self.observation_space = build_observation_space(self, self.obs_mode)
 
         self.player_max_hp = 300.0
 
@@ -447,11 +436,26 @@ class MiniDokkanEnv(gym.Env):
         print("=" * 60)
 
     def _decode_action(self, action):
+        """
+            Decode a discrete action into:
+            - selected unit index;
+            - selected board cell index.
+
+            Action encoding:
+                action = unit_idx * num_cells + orb_idx
+        """
+        action = int(action)
         unit_idx = action // self.num_cells
         orb_idx = action % self.num_cells
         return unit_idx, orb_idx
 
     def _generate_board(self):
+        """
+        Generate a random square orb board.
+
+        The board size is dynamic, but always square:
+            board_size x board_size
+        """
         return self.rng.integers(
             low=0,
             high=self.num_orb_types,
@@ -768,106 +772,36 @@ class MiniDokkanEnv(gym.Env):
 
     def _get_obs(self):
         """
-        Build the observation vector returned to the agent.
+        Build the observation returned to the agent.
 
-        Observation contains:
-        - board one-hot encoding;
-        - player HP;
-        - current boss HP;
-        - current boss type;
-        - total next boss attack;
-        - current boss attack reduction debuff;
-        - current phase;
-        - current turn;
-        - team unit features.
+        The actual observation construction is delegated to env/observation.py,
+        so flat and structured observations always remain consistent.
         """
-        obs_parts = []
-
-        # ------------------------------------------------------------
-        # Board one-hot encoding.
-        # Shape: board_size * board_size * num_orb_types
-        # ------------------------------------------------------------
-        board_flat = self.board.flatten()
-        board_one_hot = np.zeros(
-            (self.num_cells, self.num_orb_types),
-            dtype=np.float32,
-        )
-        board_one_hot[np.arange(self.num_cells), board_flat] = 1.0
-        obs_parts.append(board_one_hot.flatten())
-
-        # ------------------------------------------------------------
-        # Player HP normalized.
-        # ------------------------------------------------------------
-        player_hp_norm = self.player_hp / self.player_max_hp
-        obs_parts.append(np.array([player_hp_norm], dtype=np.float32))
-
-        # ------------------------------------------------------------
-        # Boss-related features.
-        # ------------------------------------------------------------
-        if self.current_phase < len(self.bosses):
-            boss_hp_norm = self.current_boss_hp / self.current_boss["max_hp"]
-            boss_type = self.current_boss["type"]
-            boss_attack_norm = sum(self.next_boss_attacks) / 300.0
-            boss_attack_reduction = self.current_boss["attack_reduction"]
-        else:
-            boss_hp_norm = 0.0
-            boss_type = UnitType.STR
-            boss_attack_norm = 0.0
-            boss_attack_reduction = 0.0
-
-        obs_parts.append(np.array([boss_hp_norm], dtype=np.float32))
-
-        boss_type_one_hot = np.zeros(self.num_unit_types, dtype=np.float32)
-        boss_type_one_hot[int(boss_type)] = 1.0
-        obs_parts.append(boss_type_one_hot)
-
-        obs_parts.append(np.array([boss_attack_norm], dtype=np.float32))
-        obs_parts.append(np.array([boss_attack_reduction], dtype=np.float32))
-
-        # ------------------------------------------------------------
-        # Phase and turn normalized.
-        # ------------------------------------------------------------
-        safe_phase = min(self.current_phase, len(self.bosses) - 1)
-        phase_norm = safe_phase / max(1, len(self.bosses) - 1)
-        obs_parts.append(np.array([phase_norm], dtype=np.float32))
-
-        turn_norm = min(self.turn / self.max_turns, 1.0)
-        obs_parts.append(np.array([turn_norm], dtype=np.float32))
-
-        # ------------------------------------------------------------
-        # Unit features.
-        # For each unit:
-        # - type one-hot;
-        # - normalized ATK;
-        # - normalized DEF;
-        # - dodge chance;
-        # - role one-hot.
-        # ------------------------------------------------------------
-        for unit in self.team:
-            unit_type_one_hot = np.zeros(self.num_unit_types, dtype=np.float32)
-            unit_type_one_hot[int(unit["type"])] = 1.0
-            obs_parts.append(unit_type_one_hot)
-
-            obs_parts.append(np.array([unit["atk"] / 100.0], dtype=np.float32))
-            obs_parts.append(np.array([unit["def"] / 100.0], dtype=np.float32))
-            obs_parts.append(np.array([unit["dodge"]], dtype=np.float32))
-
-            role_one_hot = np.zeros(self.num_roles, dtype=np.float32)
-            role_one_hot[int(unit["role"])] = 1.0
-            obs_parts.append(role_one_hot)
-
-        obs = np.concatenate(obs_parts).astype(np.float32)
-
-        return obs
+        return build_observation(self, self.obs_mode)
 
     def _get_info(self):
-        info = {
-            "turn": self.turn,
-            "phase": self.current_phase,
-            "player_hp": self.player_hp,
-            "boss_hp": self.current_boss_hp if self.current_phase < len(self.bosses) else 0.0,
-            "next_boss_attack": self.next_boss_attacks if self.current_phase < len(self.bosses) else 0.0,
+        """
+        Return debug and logging information.
 
+        This information is not part of the observation used by the agent.
+        It is useful for rendering, evaluation, and analysis scripts.
+        """
+        info = {
+            "turn": int(self.turn),
+            "phase": int(self.current_phase),
+            "board_size": int(self.board_size),
+            "num_cells": int(self.num_cells),
+            "player_hp": float(self.player_hp),
+            "boss_hp": (
+                float(self.current_boss_hp)
+                if self.current_phase < len(self.bosses)
+                else 0.0
+            ),
+            "next_boss_attacks": (
+                [float(a) for a in self.next_boss_attacks]
+                if self.current_phase < len(self.bosses)
+                else []
+            ),
         }
 
         info.update(self.last_info)
